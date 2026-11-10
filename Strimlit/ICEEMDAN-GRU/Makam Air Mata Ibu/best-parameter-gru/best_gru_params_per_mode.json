@@ -1,0 +1,51 @@
+{
+    "IMF_1": {
+        "units": 16,
+        "dropout": 0.16696440125951162,
+        "batch_size": 20,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.006973751367330381
+    },
+    "IMF_2": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.004467810031371011
+    },
+    "IMF_3": {
+        "units": 64,
+        "dropout": 0.013419924844200681,
+        "batch_size": 16,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.01094448983164932
+    },
+    "IMF_4": {
+        "units": 64,
+        "dropout": 0.03728198141821517,
+        "batch_size": 16,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0018462770282852735
+    },
+    "IMF_5": {
+        "units": 8,
+        "dropout": 0.3661208508104616,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0033440786848397104
+    },
+    "IMF_6": {
+        "units": 64,
+        "dropout": 0.20122016903812018,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.005520050673550571
+    },
+    "ICEEMDAN_Residue": {
+        "units": 24,
+        "dropout": 0.196485810510902,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.002296415237397126
+    }
+}

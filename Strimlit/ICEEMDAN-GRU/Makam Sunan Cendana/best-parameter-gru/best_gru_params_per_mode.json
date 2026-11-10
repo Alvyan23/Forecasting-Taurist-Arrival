@@ -1,0 +1,37 @@
+{
+    "IMF_1": {
+        "units": 64,
+        "dropout": 0.19650658015434538,
+        "batch_size": 4,
+        "learning_rate": 0.001,
+        "best_val_mae": 0.021726657326103682
+    },
+    "IMF_2": {
+        "units": 16,
+        "dropout": 0.017554735777921302,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.00686411478120856
+    },
+    "IMF_3": {
+        "units": 64,
+        "dropout": 0.06109242809386259,
+        "batch_size": 8,
+        "learning_rate": 0.001,
+        "best_val_mae": 0.004295173619991473
+    },
+    "IMF_4": {
+        "units": 8,
+        "dropout": 0.11126672175268831,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.004225758372301987
+    },
+    "ICEEMDAN_Residue": {
+        "units": 16,
+        "dropout": 0.06927217609476136,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.010977247072426189
+    }
+}

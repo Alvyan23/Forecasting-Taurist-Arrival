@@ -1,0 +1,86 @@
+{
+    "VMD_1": {
+        "units": 8,
+        "dropout": 0.23761041783920717,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0047075757263398505
+    },
+    "VMD_2": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.00471207729204138
+    },
+    "VMD_3": {
+        "units": 16,
+        "dropout": 0.11598369022544498,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.010927659705110556
+    },
+    "VMD_4": {
+        "units": 24,
+        "dropout": 0.004557583554503706,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.00464447184278474
+    },
+    "VMD_5": {
+        "units": 64,
+        "dropout": 0.22363444058778228,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.010161485618252324
+    },
+    "VMD_6": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.012214452957153973
+    },
+    "VMD_7": {
+        "units": 64,
+        "dropout": 0.005078584252520238,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.014616991814612812
+    },
+    "VMD_8": {
+        "units": 24,
+        "dropout": 0.0010422736060106408,
+        "batch_size": 4,
+        "learning_rate": 0.001,
+        "best_val_mae": 0.008106458019117978
+    },
+    "VMD_9": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0161590870156654
+    },
+    "VMD_10": {
+        "units": 16,
+        "dropout": 0.23953044094945627,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.01928983846854632
+    },
+    "VMD_11": {
+        "units": 64,
+        "dropout": 0.0026219151210661513,
+        "batch_size": 4,
+        "learning_rate": 0.001,
+        "best_val_mae": 0.009244274703594216
+    },
+    "VMD_12": {
+        "units": 16,
+        "dropout": 0.20046229931107123,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.005184580044981176
+    }
+}

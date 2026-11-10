@@ -1,0 +1,2 @@
+Component,Units,Dropout,Learning Rate,Batch Size,Best Epoch,Test MAE,Test RMSE,Model Path
+visitors,64,0.013419924844200681,0.003,16,86,0.07613322718483469,0.10589091459591816,retrain-models/visitors_gru_best.keras

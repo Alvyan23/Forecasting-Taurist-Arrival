@@ -1,0 +1,2 @@
+Component,Total_Raw,Train_Raw,Test_Raw,X_train_shape,y_train_shape,X_test_shape,y_test_shape
+visitors,108,86,22,"(74, 12, 1)","(74,)","(22, 12, 1)","(22,)"

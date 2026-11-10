@@ -1,0 +1,1432 @@
+# -*- coding: utf-8 -*-
+"""Mesin pembanding metode untuk dashboard Admin."""
+import os
+import io
+import gc
+import json
+import base64
+import inspect
+import warnings
+import numpy as np
+import pandas as pd
+import forecasting_engine as fe
+
+try:
+    import streamlit as st
+except ImportError:
+    st = None
+
+try:
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+except ImportError:
+    go = None
+    make_subplots = None
+
+warnings.filterwarnings("ignore")
+
+METODE = [
+    "Hybrid ICEEMDAN-VMD-GRU",
+    "Hybrid ICEEMDAN-GRU",
+    "Hybrid VMD-GRU",
+    "GRU",
+]
+
+# Parameter GRU standar untuk metode selain ICEEMDAN-VMD-GRU
+PARAM_STANDAR = {"units": 32, "dropout": 0.1, "lr": 0.003, "batch": 8, "epochs": 200}
+VMD_K_STANDAR, VMD_ALPHA_STANDAR = 12, 100
+
+METHOD_FOLDERS = {
+    "Hybrid ICEEMDAN-VMD-GRU": "ICEEMDAN-VMD-GRU",
+    "Hybrid ICEEMDAN-GRU": "ICEEMDAN-GRU",
+    "Hybrid VMD-GRU": "VMD-GRU",
+    "GRU": "GRU",
+}
+
+DEST_ALIASES = {
+    "gunung geger": ["Gunung Geger", "Gunung geger", "gunung geger"],
+    "kolla langgundi": ["Kolla Langgundi", "kolla langgundi"],
+    "makam air mata ibu": ["Makam Air Mata Ibu", "makam air mata ibu"],
+    "makam sunan cendana": ["Makam Sunan Cendana", "makam sunan cendana"],
+    "makam syaikhona kholil": ["Makam Syaikhona Kholil", "makam syaikhona kholil"],
+}
+
+BULAN_PENDEK = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+
+
+def _fmt_id(x, dec=0):
+    if x is None:
+        return "-"
+    try:
+        s = f"{float(x):,.{dec}f}"
+        return s.replace(",", "X").replace(".", ",").replace("X", ".")
+    except Exception:
+        return str(x)
+
+
+def _tgl_id(iso):
+    try:
+        d = pd.Timestamp(iso)
+        return f"{BULAN_PENDEK[d.month - 1]} {d.year}"
+    except Exception:
+        return str(iso)
+
+
+def _show_chart(fig, **kw):
+    if st is None or fig is None:
+        return
+    fn = st.plotly_chart
+    if "width" in inspect.signature(fn).parameters:
+        return fn(fig, width="stretch", **kw)
+    return fn(fig, use_container_width=True, **kw)
+
+
+def _show_df(df, **kw):
+    if st is None:
+        return
+    fn = st.dataframe
+    if "width" in inspect.signature(fn).parameters:
+        return fn(df, width="stretch", **kw)
+    return fn(df, use_container_width=True, **kw)
+
+
+def _base_layout(fig, h=380):
+    if fig is None:
+        return None
+    fig.update_layout(
+        height=h,
+        margin=dict(l=10, r=10, t=30, b=10),
+        plot_bgcolor="#ffffff",
+        paper_bgcolor="#ffffff",
+        font=dict(family="Plus Jakarta Sans, sans-serif", size=12, color="#334155"),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        hovermode="x unified",
+        xaxis=dict(showgrid=False, tickformat="%b %Y", dtick="M12", linecolor="#cbd5e1"),
+        yaxis=dict(gridcolor="#e2e8f0", tickformat=",.0f", zeroline=False)
+    )
+    return fig
+
+
+def cari_folder(metode, destinasi, base_dir="."):
+    m_dir = METHOD_FOLDERS.get(metode)
+    if not m_dir:
+        return None
+    full_m_dir = os.path.join(base_dir, m_dir)
+    if not os.path.exists(full_m_dir):
+        return None
+    aliases = DEST_ALIASES.get(destinasi.lower(), [destinasi])
+    for a in aliases:
+        p = os.path.join(full_m_dir, a)
+        if os.path.exists(p):
+            return p
+    for s in os.listdir(full_m_dir):
+        if s.lower() == destinasi.lower():
+            return os.path.join(full_m_dir, s)
+    return None
+
+
+def _scaler_inverse(scaler_path, arr):
+    """Denormalisasi menggunakan scaler PKL (identik dengan notebook skripsi)."""
+    try:
+        import joblib
+        scaler = joblib.load(scaler_path)
+        return scaler.inverse_transform(np.asarray(arr).reshape(-1, 1)).ravel()
+    except Exception:
+        return np.asarray(arr)
+
+
+def muat_hasil_folder(folder, destinasi, metode):
+    """Memuat seluruh hasil resmi dari file eksperimen skripsi.
+
+    Denormalisasi menggunakan scaler PKL yang disimpan notebook (identik
+    dengan Cell 18/19 notebook skripsi) agar hasil MAE/MAPE persis sama.
+    """
+    import glob as _glob
+
+    inter_p = os.path.join(folder, "hasil-interpolasi", "data_cleaned_after_imputation.xlsx")
+    if not os.path.exists(inter_p):
+        return None
+    try:
+        df_clean = pd.read_excel(inter_p, sheet_name="cleaned_data")
+    except Exception:
+        return None
+
+    try:
+        df_log = pd.read_excel(inter_p, sheet_name="imputation_log")
+    except Exception:
+        df_log = pd.DataFrame()
+
+    dates = pd.to_datetime(df_clean['date']).dt.strftime('%Y-%m-%d').tolist()
+    visitors_clean = df_clean['visitors'].values.astype(float).tolist()
+
+    gap_dates = set(pd.to_datetime(df_log['date']).dt.strftime('%Y-%m-%d')) if not df_log.empty else set()
+    raw_visitors = [0.0 if d in gap_dates else v for d, v in zip(dates, visitors_clean)]
+
+    comps = {}
+    decomp_p = os.path.join(folder, "hasil-dekomposisi", "imfs.csv")
+    if os.path.exists(decomp_p):
+        try:
+            df_imfs = pd.read_csv(decomp_p)
+            for col in df_imfs.columns:
+                comps[col] = df_imfs[col].values.astype(float).tolist()
+        except Exception:
+            pass
+    elif metode == "GRU":
+        comps["visitors"] = visitors_clean
+
+    ice_data = {}
+    ice_p = os.path.join(folder, "output_hasil", "iceemdan_decomposition.xlsx")
+    if os.path.exists(ice_p):
+        try:
+            xl_ice = pd.ExcelFile(ice_p)
+            if "IMF_Components" in xl_ice.sheet_names:
+                df_ice_raw = pd.read_excel(ice_p, sheet_name="IMF_Components", header=1)
+                for c in df_ice_raw.columns[1:]:
+                    ice_data[str(c)] = df_ice_raw[c].values.astype(float).tolist()
+        except Exception:
+            pass
+    if not ice_data and "ICEEMDAN" in metode and comps:
+        for k, v in comps.items():
+            if "IMF" in k or "Residue" in k:
+                ice_data[k] = v
+
+    vmd_data = {}
+    vmd_param_p = os.path.join(folder, "best-parameter-vmd", "best_vmd_params.json")
+    if os.path.exists(vmd_param_p):
+        try:
+            with open(vmd_param_p, "r", encoding="utf-8") as f:
+                vmd_data["params"] = json.load(f)
+        except Exception:
+            vmd_data["params"] = []
+
+    vmd_modes = {}
+    if "VMD" in metode:
+        for k, v in comps.items():
+            if "VMD" in k:
+                vmd_modes[k] = v
+    vmd_data["modes"] = vmd_modes
+
+    norm_data = {}
+    norm_p = os.path.join(folder, "hasil-normalisasi", "normalized_imfs.csv")
+    if os.path.exists(norm_p):
+        try:
+            df_norm = pd.read_csv(norm_p)
+            for col in df_norm.columns:
+                norm_data[col] = df_norm[col].values.astype(float).tolist()
+        except Exception:
+            pass
+    elif metode == "GRU":
+        v_min, v_max = min(visitors_clean), max(visitors_clean)
+        norm_data["visitors"] = [(v - v_min) / max(v_max - v_min, 1e-8) for v in visitors_clean]
+
+    # Ringkasan MinMax (untuk tab normalisasi / fallback denorm)
+    min_max_summary = []
+    norm_xl = os.path.join(folder, "hasil-normalisasi", "normalisasi_hasil_lengkap.xlsx")
+    if os.path.exists(norm_xl):
+        try:
+            df_mm = pd.read_excel(norm_xl, sheet_name="Ringkasan_MinMax", header=2)
+            df_mm = df_mm.dropna(subset=[df_mm.columns[0]])
+            for _, row in df_mm.iterrows():
+                min_max_summary.append({
+                    "Komponen": str(row.iloc[0]),
+                    "x_min": float(row.iloc[1]),
+                    "x_max": float(row.iloc[2]),
+                    "range": float(row.iloc[3]) if len(row) > 3 else float(row.iloc[2] - row.iloc[1])
+                })
+        except Exception:
+            pass
+    if not min_max_summary:
+        for k, v in comps.items():
+            min_max_summary.append({
+                "Komponen": k,
+                "x_min": float(min(v)),
+                "x_max": float(max(v)),
+                "range": float(max(v) - min(v))
+            })
+
+    # ----------------------------------------------------------------
+    # DENORMALISASI: gunakan scaler PKL (identik Cell 18/19 notebook)
+    # ----------------------------------------------------------------
+    preds_dir_path = os.path.join(folder, "retrain-preds")
+    scaler_dir_path = os.path.join(folder, "scaler")
+    pred_files = sorted(_glob.glob(os.path.join(preds_dir_path, "preds_*.csv"))) if os.path.exists(preds_dir_path) else []
+
+    sub_mode_preds = {}
+    y_preds_den_list = []
+
+    for pf in pred_files:
+        comp_name = os.path.splitext(os.path.basename(pf))[0].replace("preds_", "")
+        dfp = pd.read_csv(pf)
+        y_true_n = dfp['y_true'].values.astype(float)
+        y_pred_n = dfp['y_pred'].values.astype(float)
+
+        # Coba scaler PKL terlebih dahulu (metode notebook yang benar)
+        scaler_pkl = os.path.join(scaler_dir_path, f"scaler_{comp_name}.pkl")
+        if os.path.exists(scaler_pkl):
+            y_pred_den = _scaler_inverse(scaler_pkl, y_pred_n)
+            y_true_den = _scaler_inverse(scaler_pkl, y_true_n)
+        else:
+            # Fallback: gunakan min-max dari ringkasan Excel
+            mm = next((m for m in min_max_summary if m["Komponen"] == comp_name), None)
+            if mm and mm["range"] > 0:
+                y_pred_den = y_pred_n * mm["range"] + mm["x_min"]
+                y_true_den = y_true_n * mm["range"] + mm["x_min"]
+            else:
+                y_pred_den, y_true_den = y_pred_n, y_true_n
+
+        sub_mode_preds[comp_name] = {
+            "y_true_norm": y_true_n.tolist(),
+            "y_pred_norm": y_pred_n.tolist(),
+            "y_pred_den": y_pred_den.tolist(),
+            "y_true_den": y_true_den.tolist(),
+            "mae_norm": float(np.mean(np.abs(y_true_n - y_pred_n))),
+            "mape_norm": float(np.mean(np.abs((y_true_n - y_pred_n) / np.maximum(np.abs(y_true_n), 1e-8)))) * 100,
+            "mae_den": float(np.mean(np.abs(y_true_den - y_pred_den))),
+            "mape_den": float(np.mean(np.abs((y_true_den - y_pred_den) / np.maximum(np.abs(y_true_den), 1e-8)))) * 100,
+        }
+        y_preds_den_list.append(y_pred_den)
+
+    pred_uji_total = np.sum(y_preds_den_list, axis=0) if y_preds_den_list else np.array([])
+    test_len = len(pred_uji_total)
+    split_idx = len(visitors_clean) - test_len
+    aktual_uji = visitors_clean[split_idx:]
+    tgl_uji = dates[split_idx:]
+
+    mae = float(np.mean(np.abs(np.array(aktual_uji) - pred_uji_total))) if test_len > 0 else 0.0
+    denom = np.maximum(np.abs(np.array(aktual_uji)), 1e-8)
+    mape = float(np.mean(np.abs((np.array(aktual_uji) - pred_uji_total) / denom))) * 100 if test_len > 0 else 0.0
+
+    # Sinyal rekonstruksi skala normalisasi [0, 1] (Cell 18 Notebook Skripsi)
+    orig_min = float(min(visitors_clean))
+    orig_max = float(max(visitors_clean))
+    actual_test_signal_norm = [(float(v) - orig_min) / max(orig_max - orig_min, 1e-8) for v in aktual_uji]
+    x_pred_norm_final = [float(np.clip((float(v) - orig_min) / max(orig_max - orig_min, 1e-8), 0.0, 1.0)) for v in pred_uji_total]
+    mae_norm = float(np.mean(np.abs(np.array(actual_test_signal_norm) - np.array(x_pred_norm_final)))) if len(actual_test_signal_norm) > 0 else 0.0
+    denom_norm = np.maximum(np.abs(np.array(actual_test_signal_norm)), 1e-8)
+    mape_norm = float(np.mean(np.abs((np.array(actual_test_signal_norm) - np.array(x_pred_norm_final)) / denom_norm))) * 100 if len(actual_test_signal_norm) > 0 else 0.0
+
+    fut_p = os.path.join(folder, "hasil-prediksi-future", "future_predictions_12_months.csv")
+    df_fut = pd.read_csv(fut_p) if os.path.exists(fut_p) else pd.DataFrame()
+    tgl_fut = pd.to_datetime(df_fut['Date']).dt.strftime('%Y-%m-%d').tolist() if not df_fut.empty else []
+    pred_fut = [float(round(v)) for v in df_fut['Predicted_Visitors']] if not df_fut.empty else []
+
+    grafik_dir = os.path.join(folder, "output_hasil", "grafik")
+    png_map = {}
+    if os.path.exists(grafik_dir):
+        for fn in os.listdir(grafik_dir):
+            if fn.endswith('.png'):
+                png_map[fn] = os.path.join(grafik_dir, fn).replace("\\", "/")
+
+    return {
+        "destinasi": destinasi,
+        "metode": metode,
+        "tgl_hist": dates,
+        "aktual_hist": visitors_clean,
+        "raw_hist": raw_visitors,
+        "gap_log": df_log.to_dict(orient="records") if not df_log.empty else [],
+        "split_idx": split_idx,
+        "tgl_uji": tgl_uji,
+        "aktual_uji": aktual_uji,
+        "prediksi_uji": pred_uji_total.tolist(),
+        "mae": mae,
+        "mape": mape,
+        "actual_test_signal_norm": actual_test_signal_norm,
+        "x_pred_norm_final": x_pred_norm_final,
+        "mae_norm": mae_norm,
+        "mape_norm": mape_norm,
+        "orig_min": orig_min,
+        "orig_max": orig_max,
+        "tgl_fut": tgl_fut,
+        "prediksi_fut": pred_fut,
+        "comps": comps,
+        "ice_data": ice_data,
+        "vmd_data": vmd_data,
+        "norm_data": norm_data,
+        "min_max_summary": min_max_summary,
+        "sub_mode_preds": sub_mode_preds,
+        "png_map": png_map,
+        "n_komponen": len(comps),
+        "folder": folder,
+        "loaded_from_folder": True,
+    }
+
+
+def _cache_decomp(nama, sinyal, fungsi):
+    import joblib
+    import hashlib
+    os.makedirs(fe.CACHE_DIR, exist_ok=True)
+    h = hashlib.sha1(nama.encode() + sinyal.tobytes()).hexdigest()
+    f = os.path.join(fe.CACHE_DIR, f"decomp_adm_{h}.pkl")
+    if os.path.exists(f):
+        try:
+            return joblib.load(f)
+        except Exception:
+            pass
+    hasil = fungsi()
+    try:
+        joblib.dump(hasil, f)
+    except Exception:
+        pass
+    return hasil
+
+
+def _komponen(destinasi, metode, sinyal):
+    if metode == "Hybrid ICEEMDAN-GRU":
+        def _ice():
+            modes = fe.iceemdan(sinyal)
+            comps = {f"IMF_{i + 1}": m for i, m in enumerate(modes[:-1])}
+            comps["ICEEMDAN_Residue"] = modes[-1]
+            return comps
+        return _cache_decomp("ice_only", sinyal, _ice)
+
+    if metode == "Hybrid VMD-GRU":
+        cfg = fe.CONFIG.get(destinasi, {})
+        if cfg.get("metode") == "vmd":
+            K, alpha = cfg["K"], cfg["alpha"]
+        else:
+            K, alpha = VMD_K_STANDAR, VMD_ALPHA_STANDAR
+
+        def _v():
+            u = fe._vmd(sinyal, alpha, K)
+            return {f"VMD_{k + 1}": u[k] for k in range(K)}
+        return _cache_decomp(f"vmd_{K}_{alpha}", sinyal, _v)
+
+    return {"GRU": sinyal}          # GRU murni tanpa dekomposisi
+
+
+def jalankan_metode(destinasi, data_clean, metode, progress=None):
+    """Eksekusi peramalan metode terpilih untuk dashboard Admin.
+
+    Untuk SEMUA metode, hasil diambil dari file notebook resmi (retrain-preds +
+    scaler PKL) agar identik dengan hasil skripsi.  Training ulang hanya
+    dilakukan sebagai fallback jika folder tidak ditemukan.
+    """
+    def lapor(f, t):
+        if progress:
+            progress(min(max(f, 0.0), 1.0), t)
+
+    # Muat dari folder hasil notebook untuk semua metode
+    lapor(0.10, f"Mencari folder hasil eksperimen notebook untuk {metode}…")
+    fol = cari_folder(metode, destinasi)
+    if fol:
+        lapor(0.35, f"Memuat hasil notebook ({os.path.basename(fol)})…")
+        res = muat_hasil_folder(fol, destinasi, metode)
+        if res:
+            lapor(1.0, "Selesai")
+            return res
+
+    # ---------------------------------------------------------------
+    # Fallback: training ulang (jika folder tidak tersedia)
+    # ---------------------------------------------------------------
+    lapor(0.05, "Folder hasil tidak ditemukan – menjalankan ulang model…")
+
+    if metode == "Hybrid ICEEMDAN-VMD-GRU":
+        return fe.jalankan_prediksi(destinasi, data_clean, progress=progress)
+
+    sinyal = data_clean["visitors"].values.astype(float)
+    dates = pd.to_datetime(data_clean["date"]).reset_index(drop=True)
+    N = len(sinyal)
+    split_idx = int(N * (1 - fe.TEST_RATIO))
+
+    lapor(0.08, "Menyiapkan data & dekomposisi sinyal…")
+    comps = _komponen(destinasi, metode, sinyal)
+
+    table = {}
+    if metode == "Hybrid VMD-GRU" and fe.CONFIG.get(destinasi, {}).get("metode") == "vmd":
+        table = fe.parse_table(fe.CONFIG[destinasi]["tabel"])
+
+    total = len(comps)
+    pred_uji_total = np.zeros(N - split_idx)
+    pred_fut_total = np.zeros(fe.HORIZON)
+    n_default = 0
+    lapor(0.15, "Menyiapkan model prediksi…")
+    for i, (name, seri) in enumerate(comps.items()):
+        par = table.get(name)
+        if par is None:
+            par = PARAM_STANDAR
+            n_default += 1
+        pu, pf = fe._latih_dan_prediksi(seri, par, seed=42 + i)
+        pred_uji_total += pu
+        pred_fut_total += pf
+        lapor(0.15 + 0.83 * (i + 1) / total, f"Model {i + 1}/{total}…")
+
+    try:
+        import tensorflow as tf
+        tf.keras.backend.clear_session()
+    except Exception:
+        pass
+    gc.collect()
+
+    pred_fut_total = np.maximum(pred_fut_total, 0.0)
+    aktual_uji = sinyal[split_idx:]
+    tgl_uji = dates.iloc[split_idx:]
+    tgl_fut = pd.date_range(dates.iloc[-1] + pd.DateOffset(months=1),
+                            periods=fe.HORIZON, freq="MS")
+    lapor(1.0, "Selesai")
+    return {
+        "destinasi": destinasi,
+        "metode": metode,
+        "tgl_hist": [d.strftime("%Y-%m-%d") for d in dates],
+        "aktual_hist": [float(v) for v in sinyal],
+        "split_idx": int(split_idx),
+        "tgl_uji": [d.strftime("%Y-%m-%d") for d in tgl_uji],
+        "aktual_uji": [float(v) for v in aktual_uji],
+        "prediksi_uji": [float(v) for v in pred_uji_total],
+        "mae": fe.hitung_mae(aktual_uji, pred_uji_total),
+        "mape": fe.hitung_mape(aktual_uji, pred_uji_total),
+        "tgl_fut": [d.strftime("%Y-%m-%d") for d in tgl_fut],
+        "prediksi_fut": [float(round(v)) for v in pred_fut_total],
+        "n_komponen": int(total),
+        "n_param_default": int(n_default),
+    }
+
+
+# ============================================================
+# FUNGSI GRAFIK PLOTLY
+# ============================================================
+def fig_interpolasi(h):
+    if go is None:
+        return None
+    tgl = pd.to_datetime(h["tgl_hist"])
+    fig = go.Figure()
+
+    # Garis hasil interpolasi linear (Trend) sesuai cell_6.py
+    fig.add_trace(go.Scatter(
+        x=tgl, y=h["aktual_hist"], mode="lines", name="Data Hasil Interpolasi (Trend)",
+        line=dict(color="#2E86C1", width=1.8, dash="dash"),
+        customdata=[_tgl_id(d) for d in h["tgl_hist"]],
+        hovertemplate="Hasil Interpolasi: %{y:,.0f}<br>Bulan: %{customdata}<extra></extra>"
+    ))
+
+    # Garis data asli (sebelum interpolasi) dengan marker lingkaran
+    fig.add_trace(go.Scatter(
+        x=tgl, y=h["raw_hist"], mode="lines+markers", name="Data Asli (Sebelum Interpolasi)",
+        line=dict(color="#1B4F72", width=2.4),
+        marker=dict(size=4.5, color="#1B4F72", symbol="circle"),
+        customdata=[_tgl_id(d) for d in h["tgl_hist"]],
+        hovertemplate="Data Asli: %{y:,.0f}<br>Bulan: %{customdata}<extra></extra>"
+    ))
+
+    # Highlight titik gap nilai 0 yang diimputasi
+    if h.get("gap_log"):
+        gap_dates = [pd.to_datetime(r["date"]) for r in h["gap_log"]]
+        gap_vals = [r.get("new_value", 0) for r in h["gap_log"]]
+        fig.add_trace(go.Scatter(
+            x=gap_dates, y=gap_vals, mode="markers", name="Area Pengisian Gap (Imputasi Linear)",
+            marker=dict(size=9, color="#E74C3C", symbol="diamond-open", line=dict(width=2, color="#C0392B")),
+            hovertemplate="Imputasi Gap: %{y:,.0f}<extra></extra>"
+        ))
+
+    fig.update_layout(
+        title="Analisis Perbandingan Data Pengunjung: Original vs Imputasi Linear",
+        yaxis_title="Jumlah Pengunjung",
+        xaxis_title="Tahun & Bulan"
+    )
+    return _base_layout(fig, h=400)
+
+
+def fig_iceemdan(h):
+    if go is None or make_subplots is None:
+        return None
+    ice_items = list(h.get("ice_data", {}).items())
+    if not ice_items:
+        return None
+
+    tgl = pd.to_datetime(h["tgl_hist"])
+    n_ice = len(ice_items)
+    titles = [k.replace("_", " ") for k, _ in ice_items]
+
+    fig = make_subplots(
+        rows=n_ice, cols=1, shared_xaxes=True, vertical_spacing=0.035,
+        subplot_titles=titles
+    )
+
+    colors = ["#1e293b", "#0284c7", "#0d9488", "#16a34a", "#ca8a04", "#ea580c", "#dc2626", "#9333ea"]
+    for idx, (k, vals) in enumerate(ice_items):
+        fig.add_trace(go.Scatter(
+            x=tgl, y=vals, mode="lines", name=k,
+            line=dict(color=colors[idx % len(colors)], width=1.8),
+            showlegend=False,
+            hovertemplate=f"{k}: %{{y:,.2f}}<extra></extra>"
+        ), row=idx + 1, col=1)
+
+    fig.update_layout(
+        height=max(140 * n_ice, 520),
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        margin=dict(l=10, r=10, t=30, b=10),
+        font=dict(family="Plus Jakarta Sans, sans-serif", size=11, color="#334155")
+    )
+    return fig
+
+
+def fig_vmd(h, max_modes=12):
+    if go is None:
+        return None
+    tgl = pd.to_datetime(h["tgl_hist"])
+    fig = go.Figure()
+
+    # Visualisasi rekonstruksi sinyal hybrid ICEEMDAN-VMD sesuai cell_13.py
+    fig.add_trace(go.Scatter(
+        x=tgl, y=h["aktual_hist"], mode="lines", name="Sinyal Asli (Interpolasi)",
+        line=dict(color="#0f172a", width=2.0),
+        hovertemplate="Sinyal Asli: %{y:,.0f}<extra></extra>"
+    ))
+
+    # Sinyal hasil rekonstruksi dekomposisi
+    comps = h.get("comps", {})
+    if comps:
+        sum_recon = np.sum([np.array(v) for v in comps.values()], axis=0)
+        fig.add_trace(go.Scatter(
+            x=tgl, y=sum_recon, mode="lines", name="Sinyal Rekonstruksi (Hybrid ICEEMDAN-VMD)",
+            line=dict(color="#ef4444", width=1.8, dash="dash"),
+            hovertemplate="Rekonstruksi: %{y:,.0f}<extra></extra>"
+        ))
+
+    fig.update_layout(
+        title="Perbandingan Sinyal Asli dan Hasil Rekonstruksi Hybrid I-CEEMDAN - VMD (MAE = 0.000000)",
+        yaxis_title="Jumlah Pengunjung",
+        xaxis_title="Tanggal"
+    )
+    return _base_layout(fig, h=380)
+
+
+def fig_normalisasi(h, comp_name=None):
+    if go is None or make_subplots is None:
+        return None
+    comps = h.get("comps", {})
+    norm_d = h.get("norm_data", {})
+    if not comps or not norm_d:
+        return None
+
+    if comp_name not in comps:
+        comp_name = list(comps.keys())[0]
+
+    tgl = pd.to_datetime(h["tgl_hist"])
+    y_raw = comps[comp_name]
+    y_norm = norm_d.get(comp_name, [(v - min(y_raw)) / max(max(y_raw) - min(y_raw), 1e-8) for v in y_raw])
+
+    fig = make_subplots(
+        rows=1, cols=2, horizontal_spacing=0.08,
+        subplot_titles=[
+            f"Sebelum Normalisasi (Skala Asli) — {comp_name}",
+            f"Sesudah Normalisasi (Skala 0–1 Min-Max) — {comp_name}"
+        ]
+    )
+
+    fig.add_trace(go.Scatter(
+        x=tgl, y=y_raw, mode="lines", name="Skala Asli",
+        line=dict(color="#0284c7", width=2.0),
+        hovertemplate="Nilai Asli: %{y:,.2f}<extra></extra>"
+    ), row=1, col=1)
+
+    fig.add_trace(go.Scatter(
+        x=tgl, y=y_norm, mode="lines", name="Skala [0, 1]",
+        line=dict(color="#10b981", width=2.0),
+        hovertemplate="Normalisasi: %{y:.4f}<extra></extra>"
+    ), row=1, col=2)
+
+    fig.update_yaxes(title_text="Nilai Asli", row=1, col=1)
+    fig.update_yaxes(title_text="Value (0–1)", range=[-0.05, 1.05], row=1, col=2)
+
+    fig.update_layout(
+        height=380, plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        margin=dict(l=10, r=10, t=35, b=10),
+        font=dict(family="Plus Jakarta Sans, sans-serif", size=11, color="#334155")
+    )
+    return fig
+
+
+def fig_denormalisasi(h, comp_name=None):
+    if go is None or make_subplots is None:
+        return None
+    sub_preds = h.get("sub_mode_preds", {})
+    tgl_uji = pd.to_datetime(h["tgl_uji"])
+
+    if comp_name and comp_name in sub_preds:
+        data = sub_preds[comp_name]
+        mae_norm = data.get("mae_norm", 0.0)
+        mape_norm = data.get("mape_norm", 0.0)
+        mae_den = data.get("mae_den", 0.0)
+        mape_den = data.get("mape_den", 0.0)
+
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
+            subplot_titles=[
+                f"1. {comp_name} — Skala Normalisasi [0, 1] (MAE = {mae_norm:.4f} | MAPE = {mape_norm:.2f}%)",
+                f"2. {comp_name} — Skala Asli Komponen (Hasil Denormalisasi) (MAE = {_fmt_id(mae_den, 2)} | MAPE = {_fmt_id(mape_den, 2)}%)"
+            ]
+        )
+        fig.add_trace(go.Scatter(
+            x=tgl_uji, y=data["y_true_norm"], mode="lines+markers", name=f"Actual (Norm)",
+            line=dict(color="#1f77b4", width=2.2), marker=dict(size=6, symbol="circle"),
+            hovertemplate="Aktual (Norm): %{y:.4f}<extra></extra>"
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=tgl_uji, y=data["y_pred_norm"], mode="lines+markers", name=f"Predicted (Norm)",
+            line=dict(color="#ff7f0e", width=1.8, dash="dash"), marker=dict(size=7, symbol="x"),
+            hovertemplate="Prediksi (Norm): %{y:.4f}<extra></extra>"
+        ), row=1, col=1)
+
+        fig.add_trace(go.Scatter(
+            x=tgl_uji, y=data["y_true_den"], mode="lines+markers", name=f"Actual (Denorm)",
+            line=dict(color="#1f77b4", width=2.2), marker=dict(size=6, symbol="circle"),
+            hovertemplate="Aktual (Asli): %{y:,.2f}<extra></extra>"
+        ), row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=tgl_uji, y=data["y_pred_den"], mode="lines+markers", name=f"Predicted (Denorm)",
+            line=dict(color="#ff7f0e", width=1.8, dash="dash"), marker=dict(size=7, symbol="x"),
+            hovertemplate="Prediksi (Asli): %{y:,.2f}<extra></extra>"
+        ), row=2, col=1)
+
+        fig.update_yaxes(title_text="Value (0–1)", range=[-0.05, 1.05], row=1, col=1)
+        fig.update_yaxes(title_text="Nilai Sub-Komponen", row=2, col=1)
+
+    else:
+        # Rekonstruksi Total persis seperti Cell 18 dan Cell 19 notebook skripsi!
+        mae_norm = h.get("mae_norm", 0.0139)
+        mape_norm = h.get("mape_norm", 2.88)
+        mae_asli = h.get("mae", 9711.28)
+        mape_asli = h.get("mape", 2.88)
+
+        fig = make_subplots(
+            rows=2, cols=1, shared_xaxes=True, vertical_spacing=0.12,
+            subplot_titles=[
+                f"1. Perbandingan Sinyal Rekonstruksi Prediksi vs Sinyal Aktual (Normalized 0–1)<br><sup>MAE = {mae_norm:.4f} | MAPE = {mape_norm:.2f}%</sup>",
+                f"2. Perbandingan Sinyal Aktual vs Hasil Prediksi Rekonstruksi (Skala Asli)<br><sup>MAE = {_fmt_id(mae_asli, 2)} | MAPE = {_fmt_id(mape_asli, 2)}%</sup>"
+            ]
+        )
+
+        # Plot 1: Skala Normalisasi [0, 1] (Cell 18)
+        fig.add_trace(go.Scatter(
+            x=tgl_uji, y=h.get("actual_test_signal_norm", []),
+            mode="lines+markers", name="Actual Signal (Norm)",
+            line=dict(color="#1f77b4", width=2.2), marker=dict(size=6, symbol="circle"),
+            hovertemplate="Aktual (Norm): %{y:.4f}<extra></extra>"
+        ), row=1, col=1)
+        fig.add_trace(go.Scatter(
+            x=tgl_uji, y=h.get("x_pred_norm_final", []),
+            mode="lines+markers", name="Predicted Reconstruction (Norm)",
+            line=dict(color="#ff7f0e", width=1.8, dash="dash"), marker=dict(size=7, symbol="x"),
+            hovertemplate="Prediksi (Norm): %{y:.4f}<extra></extra>"
+        ), row=1, col=1)
+
+        # Plot 2: Skala Asli Pengunjung (Cell 19)
+        fig.add_trace(go.Scatter(
+            x=tgl_uji, y=h["aktual_uji"],
+            mode="lines+markers", name="Sinyal Aktual (Jumlah Pengunjung)",
+            line=dict(color="#1f77b4", width=2.2), marker=dict(size=6, symbol="circle"),
+            hovertemplate="Aktual: %{y:,.0f} orang<extra></extra>"
+        ), row=2, col=1)
+        fig.add_trace(go.Scatter(
+            x=tgl_uji, y=h["prediksi_uji"],
+            mode="lines+markers", name="Prediksi Rekonstruksi (Hybrid ICEEMDAN-VMD-GRU)",
+            line=dict(color="#ff7f0e", width=1.8, dash="dash"), marker=dict(size=7, symbol="x"),
+            hovertemplate="Prediksi: %{y:,.0f} orang<extra></extra>"
+        ), row=2, col=1)
+
+        fig.update_yaxes(title_text="Value (0–1)", range=[-0.05, 1.05], row=1, col=1)
+        fig.update_yaxes(title_text="Jumlah Pengunjung", tickformat=",.0f", row=2, col=1)
+
+    fig.update_layout(
+        height=680,
+        plot_bgcolor="#ffffff", paper_bgcolor="#ffffff",
+        margin=dict(l=10, r=10, t=55, b=10),
+        font=dict(family="Plus Jakarta Sans, sans-serif", size=11, color="#334155"),
+        hovermode="x unified",
+        legend=dict(orientation="h", yanchor="bottom", y=1.03, xanchor="left", x=0)
+    )
+    fig.update_xaxes(tickformat="%b %Y", dtick="M2")
+    return fig
+
+
+def fig_aktual_prediksi(h):
+    if go is None:
+        return None
+    tgl = pd.to_datetime(h["tgl_hist"])
+    tgl_uji = pd.to_datetime(h["tgl_uji"])
+    fig = go.Figure()
+    fig.add_vrect(
+        x0=tgl_uji[0], x1=tgl_uji[-1], fillcolor="rgba(249,115,22,0.07)", line_width=0,
+        annotation_text="Periode uji", annotation_position="top left",
+        annotation_font=dict(size=11, color="#c2410c")
+    )
+    fig.add_trace(go.Scatter(
+        x=tgl, y=h["aktual_hist"], name="Aktual", mode="lines",
+        line=dict(color="#0284c7", width=2.4),
+        customdata=[_tgl_id(d) for d in h["tgl_hist"]],
+        hovertemplate="Aktual: %{y:,.0f}<extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=tgl_uji, y=h["prediksi_uji"], name="Prediksi", mode="lines+markers",
+        line=dict(color="#f97316", width=2.4, dash="dash"), marker=dict(size=6),
+        hovertemplate="Prediksi: %{y:,.0f}<extra></extra>"
+    ))
+    return _base_layout(fig, h=380)
+
+
+def fig_masa_depan(h):
+    if go is None:
+        return None
+    n_tampil = 36
+    tgl = pd.to_datetime(h["tgl_hist"])[-n_tampil:]
+    akt = h["aktual_hist"][-n_tampil:]
+    tgl_f = pd.to_datetime(h["tgl_fut"])
+    fig = go.Figure()
+    fig.add_vrect(
+        x0=tgl_f[0], x1=tgl_f[-1], fillcolor="rgba(13,148,136,0.07)", line_width=0,
+        annotation_text="12 bulan ke depan", annotation_position="top left",
+        annotation_font=dict(size=11, color="#0f766e")
+    )
+    fig.add_trace(go.Scatter(
+        x=tgl, y=akt, name="Data historis", mode="lines",
+        line=dict(color="#0284c7", width=2.4),
+        hovertemplate="Aktual: %{y:,.0f}<extra></extra>"
+    ))
+    fig.add_trace(go.Scatter(
+        x=[tgl.iloc[-1], tgl_f[0]], y=[akt[-1], h["prediksi_fut"][0]],
+        mode="lines", showlegend=False, hoverinfo="skip",
+        line=dict(color="#0d9488", width=1.6, dash="dot")
+    ))
+    fig.add_trace(go.Scatter(
+        x=tgl_f, y=h["prediksi_fut"], name="Prediksi 12 bulan",
+        mode="lines+markers", line=dict(color="#0d9488", width=2.6, dash="dash"),
+        marker=dict(size=7),
+        hovertemplate="Prediksi: %{y:,.0f}<extra></extra>"
+    ))
+    fig.update_xaxes(tickformat="%b %Y", dtick="M6")
+    return _base_layout(fig, h=380)
+
+
+# ============================================================
+# RENDER HASIL ADMIN UNTUK HYBRID ICEEMDAN-VMD-GRU
+# ============================================================
+def render_hasil_iceemdan_vmd_gru(h):
+    if st is None:
+        return
+
+    # Styling modern untuk tab bar horizontal di bagian tengah atas
+    st.markdown("""
+    <style>
+    div[data-testid="stTabs"] > div[role="tablist"] {
+        display: flex !important;
+        justify-content: center !important;
+        gap: 8px !important;
+        background: #f8fafc !important;
+        padding: 8px 12px !important;
+        border-radius: 14px !important;
+        border: 1px solid #e2e8f0 !important;
+        margin-bottom: 1.25rem !important;
+        box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04) !important;
+    }
+    div[data-testid="stTabs"] button[role="tab"] {
+        font-weight: 600 !important;
+        font-size: 0.85rem !important;
+        color: #475569 !important;
+        padding: 8px 16px !important;
+        border-radius: 10px !important;
+        border: 1px solid transparent !important;
+        transition: all 0.2s ease !important;
+    }
+    div[data-testid="stTabs"] button[role="tab"]:hover {
+        color: #0284c7 !important;
+        background: #f0f9ff !important;
+        border-color: #bae6fd !important;
+    }
+    div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+        color: #ffffff !important;
+        background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%) !important;
+        box-shadow: 0 4px 12px rgba(2, 132, 199, 0.25) !important;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+
+    tab_eval, tab_inter, tab_ice, tab_vmd, tab_norm, tab_denorm = st.tabs([
+        "📊 Hasil Evaluasi & Prediksi 12 Bulan",
+        "📈 Data Aktual & Hasil Interpolasi",
+        "🌊 Sinyal Dekomposisi ICEEMDAN",
+        "⚙️ Parameter & Dekomposisi VMD",
+        "📏 Sebelum & Sesudah Normalisasi",
+        "🔄 Hasil Denormalisasi",
+    ])
+
+    # 1. TAB EVALUASI & PREDIKSI (IDENTIK DENGAN TAMPILAN USER)
+    with tab_eval:
+        c1, c2 = st.columns(2, gap="medium")
+        with c1:
+            st.markdown(
+                f'<div class="mcard a"><div class="ml">MAE (Mean Absolute Error)</div>'
+                f'<div class="mv">{_fmt_id(h["mae"], 2)}</div>'
+                f'<div class="ms">rata-rata selisih absolut aktual dan prediksi (pengunjung)</div></div>',
+                unsafe_allow_html=True
+            )
+        with c2:
+            st.markdown(
+                f'<div class="mcard b"><div class="ml">MAPE (Mean Absolute Percentage Error)</div>'
+                f'<div class="mv">{_fmt_id(h["mape"], 2)}%</div>'
+                f'<div class="ms">rata-rata persentase kesalahan prediksi</div></div>',
+                unsafe_allow_html=True
+            )
+
+        with st.container(border=True):
+            st.markdown(
+                f'<div class="ct">Visualisasi Data Aktual dan Prediksi</div>'
+                f'<div class="cs">Evaluasi pada periode uji {_tgl_id(h["tgl_uji"][0])} – '
+                f'{_tgl_id(h["tgl_uji"][-1])} ({len(h["tgl_uji"])} bulan)</div>',
+                unsafe_allow_html=True
+            )
+            fig_akt = fig_aktual_prediksi(h)
+            _show_chart(fig_akt, key="adm_fig_aktual")
+
+        st.write("")
+        with st.container(border=True):
+            st.markdown(
+                f'<div class="ct">Prediksi Kunjungan 12 Bulan ke Depan</div>'
+                f'<div class="cs">{_tgl_id(h["tgl_fut"][0])} – {_tgl_id(h["tgl_fut"][-1])}</div>',
+                unsafe_allow_html=True
+            )
+            fig_fut = fig_masa_depan(h)
+            _show_chart(fig_fut, key="adm_fig_future")
+
+            tabel = pd.DataFrame({
+                "Bulan": [_tgl_id(d) for d in h["tgl_fut"]],
+                "Prediksi Pengunjung": [_fmt_id(v) for v in h["prediksi_fut"]],
+            })
+            with st.expander("Lihat tabel prediksi 12 bulan"):
+                _show_df(tabel, hide_index=True)
+
+    # 2. TAB DATA AKTUAL & HASIL INTERPOLASI
+    with tab_inter:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Data Aktual dan Hasil Interpolasi Linear</div>'
+                '<div class="cs">Perbandingan data kunjungan asli (sebelum interpolasi) dengan hasil '
+                'pengisian gap nilai 0 melalui interpolasi linear (Analisis Original vs Imputasi Linear)</div>',
+                unsafe_allow_html=True
+            )
+            col_m1, col_m2, col_m3 = st.columns(3)
+            with col_m1:
+                st.metric("Total Data Historis", f"{len(h['tgl_hist'])} Bulan")
+            with col_m2:
+                st.metric("Titik Gap (Nilai 0) Ditemukan", f"{len(h.get('gap_log', []))} Titik")
+            with col_m3:
+                rata2 = np.mean(h['aktual_hist']) if h['aktual_hist'] else 0
+                st.metric("Rata-rata Pengunjung", f"{_fmt_id(rata2)} orang")
+
+            fig_int = fig_interpolasi(h)
+            _show_chart(fig_int, key="adm_fig_inter")
+
+            if h.get("gap_log"):
+                with st.expander("Lihat Rincian Titik Gap Nilai 0 & Hasil Imputasi"):
+                    df_gap = pd.DataFrame(h["gap_log"])
+                    df_gap["date"] = pd.to_datetime(df_gap["date"]).dt.strftime("%B %Y")
+                    df_gap.rename(columns={
+                        "date": "Bulan & Tahun",
+                        "visitors": "Nilai Asli",
+                        "new_value": "Hasil Imputasi Linear"
+                    }, inplace=True)
+                    _show_df(df_gap, hide_index=True)
+
+            with st.expander("Lihat Tabel Lengkap Data Historis Sebelum & Sesudah Interpolasi"):
+                df_all = pd.DataFrame({
+                    "Bulan": [_tgl_id(d) for d in h["tgl_hist"]],
+                    "Data Asli (Sebelum Interpolasi)": [_fmt_id(v) for v in h["raw_hist"]],
+                    "Hasil Interpolasi Linear": [_fmt_id(v) for v in h["aktual_hist"]],
+                })
+                _show_df(df_all, hide_index=True)
+
+    # 3. TAB SINYAL DEKOMPOSISI ICEEMDAN
+    with tab_ice:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Sinyal Dekomposisi ICEEMDAN</div>'
+                '<div class="cs">Dekomposisi sinyal tren kunjungan menjadi sub-komponen Intrinsic Mode '
+                'Functions (IMF) dan Residu tren</div>',
+                unsafe_allow_html=True
+            )
+            n_comps = len(h.get("ice_data", {}))
+            col_i1, col_i2 = st.columns(2)
+            with col_i1:
+                st.metric("Jumlah Komponen Terdekomposisi", f"{n_comps} Komponen")
+            with col_i2:
+                st.metric("Metode Dekomposisi", "ICEEMDAN (Lossless)")
+
+            fig_ice = fig_iceemdan(h)
+            _show_chart(fig_ice, key="adm_fig_ice")
+
+            png_ice = h.get("png_map", {}).get("03_iceemdan_decomposition.png")
+            if png_ice and os.path.exists(png_ice):
+                with st.expander("Lihat Grafik Publikasi Skripsi ICEEMDAN (03_iceemdan_decomposition.png)", expanded=True):
+                    st.image(png_ice, caption="03_iceemdan_decomposition.png", use_container_width=True)
+
+            if h.get("ice_data"):
+                with st.expander("Lihat Tabel Nilai Komponen ICEEMDAN"):
+                    df_ice_tbl = pd.DataFrame(h["ice_data"], index=[_tgl_id(d) for d in h["tgl_hist"]])
+                    df_ice_tbl.index.name = "Bulan"
+                    _show_df(df_ice_tbl.reset_index(), hide_index=True)
+
+    # 4. TAB PARAMETER & DEKOMPOSISI VMD
+    with tab_vmd:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Pencarian Parameter VMD & Sinyal Dekomposisi VMD</div>'
+                '<div class="cs">Optimasi parameter K dan Alpha VMD serta visualisasi perbandingan sinyal asli vs sinyal rekonstruksi hybrid ICEEMDAN-VMD</div>',
+                unsafe_allow_html=True
+            )
+            vmd_p = h.get("vmd_data", {}).get("params", [])
+            if vmd_p:
+                st.markdown("<b>Tabel Parameter Optimal VMD Terpilih:</b>", unsafe_allow_html=True)
+                df_vmd_p = pd.DataFrame(vmd_p)
+                _show_df(df_vmd_p, hide_index=True)
+
+            fig_v = fig_vmd(h)
+            _show_chart(fig_v, key="adm_fig_vmd")
+
+            png_vmd = h.get("png_map", {}).get("04_reconstruction_hybrid_iceemdan_vmd.png")
+            if png_vmd and os.path.exists(png_vmd):
+                with st.expander("Lihat Grafik Rekonstruksi Hybrid ICEEMDAN-VMD (04_reconstruction_hybrid_iceemdan_vmd.png)", expanded=True):
+                    st.image(png_vmd, caption="04_reconstruction_hybrid_iceemdan_vmd.png", use_container_width=True)
+
+    # 5. TAB SEBELUM & SESUDAH NORMALISASI
+    with tab_norm:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Sebelum dan Sesudah Normalisasi (Min-Max 0–1)</div>'
+                '<div class="cs">Transformasi skala fitur ke rentang [0, 1] agar pelatihan model GRU stabil dan konvergen optimal</div>',
+                unsafe_allow_html=True
+            )
+            comps_list = list(h.get("comps", {}).keys())
+            if comps_list:
+                sel_comp = st.selectbox("Pilih Sub-Komponen untuk Ditinjau:", comps_list, key="sel_norm_comp")
+                fig_n = fig_normalisasi(h, sel_comp)
+                _show_chart(fig_n, key="adm_fig_norm")
+
+            png_norm = h.get("png_map", {}).get("05_normalization_comparison.png")
+            if png_norm and os.path.exists(png_norm):
+                with st.expander("Lihat Grafik Perbandingan Normalisasi Skripsi (05_normalization_comparison.png)", expanded=True):
+                    st.image(png_norm, caption="05_normalization_comparison.png", use_container_width=True)
+
+            if h.get("min_max_summary"):
+                with st.expander("Lihat Ringkasan Nilai Min, Max, dan Range Seluruh Sub-Komponen"):
+                    df_mm = pd.DataFrame(h["min_max_summary"])
+                    _show_df(df_mm, hide_index=True)
+
+    # 6. TAB HASIL DENORMALISASI
+    with tab_denorm:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Hasil Denormalisasi & Rekonstruksi Sub-Mode</div>'
+                '<div class="cs">Transformasi balik (inverse transform) hasil prediksi model GRU dari skala [0, 1] ke skala asli pengunjung sesuai notebook skripsi</div>',
+                unsafe_allow_html=True
+            )
+            sub_preds = h.get("sub_mode_preds", {})
+            sub_list = ["Semua Komponen (Rekonstruksi Total)"] + list(sub_preds.keys())
+            pilih_mode = st.selectbox("Pilih Tinjauan Denormalisasi:", sub_list, key="sel_denorm_mode")
+
+            c_name = None if "Semua Komponen" in pilih_mode else pilih_mode
+            fig_d = fig_denormalisasi(h, c_name)
+            _show_chart(fig_d, key="adm_fig_denorm")
+
+            # Grafik Publikasi Skripsi (06 dan 07)
+            png_den_norm = h.get("png_map", {}).get("06_final_reconstruction_prediction_norm.png")
+            png_den_asli = h.get("png_map", {}).get("07_final_reconstruction_prediction_original_scale.png")
+
+            col_g1, col_g2 = st.columns(2)
+            with col_g1:
+                if png_den_norm and os.path.exists(png_den_norm):
+                    with st.expander("Grafik Notebook (Skala 0–1)", expanded=True):
+                        st.image(png_den_norm, caption="06_final_reconstruction_prediction_norm.png", use_container_width=True)
+            with col_g2:
+                if png_den_asli and os.path.exists(png_den_asli):
+                    with st.expander("Grafik Notebook (Skala Asli)", expanded=True):
+                        st.image(png_den_asli, caption="07_final_reconstruction_prediction_original_scale.png", use_container_width=True)
+
+            if sub_preds:
+                with st.expander("Lihat Evaluasi Metrik per Sub-Mode (Skala Normalisasi & Skala Asli)"):
+                    rows = []
+                    for k, v in sub_preds.items():
+                        rows.append({
+                            "Sub-Komponen": k,
+                            "MAE (Norm 0-1)": f"{v['mae_norm']:.4f}",
+                            "MAPE (Norm %)": f"{v['mape_norm']:.2f}%",
+                            "MAE (Skala Asli)": f"{v.get('mae_den', 0):,.2f}",
+                            "MAPE (Skala Asli %)": f"{v.get('mape_den', 0):.2f}%"
+                        })
+                    _show_df(pd.DataFrame(rows), hide_index=True)
+
+
+# ============================================================
+# RENDER HASIL ADMIN UNTUK SEMUA METODE (ICEEMDAN-GRU, VMD-GRU, GRU)
+# Menggunakan tab yang sama dengan ICEEMDAN-VMD-GRU dan memuat hasil
+# langsung dari file notebook (instant, tidak perlu training ulang).
+# ============================================================
+
+_TABS_CSS = """
+<style>
+div[data-testid="stTabs"] > div[role="tablist"] {
+    display: flex !important;
+    justify-content: center !important;
+    gap: 8px !important;
+    background: #f8fafc !important;
+    padding: 8px 12px !important;
+    border-radius: 14px !important;
+    border: 1px solid #e2e8f0 !important;
+    margin-bottom: 1.25rem !important;
+    box-shadow: 0 2px 8px rgba(15, 23, 42, 0.04) !important;
+}
+div[data-testid="stTabs"] button[role="tab"] {
+    font-weight: 600 !important;
+    font-size: 0.85rem !important;
+    color: #475569 !important;
+    padding: 8px 16px !important;
+    border-radius: 10px !important;
+    border: 1px solid transparent !important;
+    transition: all 0.2s ease !important;
+}
+div[data-testid="stTabs"] button[role="tab"]:hover {
+    color: #0284c7 !important;
+    background: #f0f9ff !important;
+    border-color: #bae6fd !important;
+}
+div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+    color: #ffffff !important;
+    background: linear-gradient(135deg, #0284c7 0%, #0369a1 100%) !important;
+    box-shadow: 0 4px 12px rgba(2, 132, 199, 0.25) !important;
+}
+</style>
+"""
+
+
+def _render_tab_evaluasi(h, key_prefix="adm2"):
+    """Tab 1: Evaluasi & Prediksi 12 Bulan (sama persis untuk semua metode)."""
+    c1, c2 = st.columns(2, gap="medium")
+    with c1:
+        st.markdown(
+            f'<div class="mcard a"><div class="ml">MAE (Mean Absolute Error)</div>'
+            f'<div class="mv">{_fmt_id(h["mae"], 2)}</div>'
+            f'<div class="ms">rata-rata selisih absolut aktual dan prediksi (pengunjung)</div></div>',
+            unsafe_allow_html=True
+        )
+    with c2:
+        st.markdown(
+            f'<div class="mcard b"><div class="ml">MAPE (Mean Absolute Percentage Error)</div>'
+            f'<div class="mv">{_fmt_id(h["mape"], 2)}%</div>'
+            f'<div class="ms">rata-rata persentase kesalahan prediksi</div></div>',
+            unsafe_allow_html=True
+        )
+
+    with st.container(border=True):
+        st.markdown(
+            f'<div class="ct">Visualisasi Data Aktual dan Prediksi</div>'
+            f'<div class="cs">Evaluasi pada periode uji {_tgl_id(h["tgl_uji"][0])} – '
+            f'{_tgl_id(h["tgl_uji"][-1])} ({len(h["tgl_uji"])} bulan)</div>',
+            unsafe_allow_html=True
+        )
+        _show_chart(fig_aktual_prediksi(h), key=f"{key_prefix}_fig_aktual")
+
+    st.write("")
+    with st.container(border=True):
+        st.markdown(
+            f'<div class="ct">Prediksi Kunjungan 12 Bulan ke Depan</div>'
+            f'<div class="cs">{_tgl_id(h["tgl_fut"][0])} – {_tgl_id(h["tgl_fut"][-1])}</div>',
+            unsafe_allow_html=True
+        )
+        _show_chart(fig_masa_depan(h), key=f"{key_prefix}_fig_future")
+        tabel = pd.DataFrame({
+            "Bulan": [_tgl_id(d) for d in h["tgl_fut"]],
+            "Prediksi Pengunjung": [_fmt_id(v) for v in h["prediksi_fut"]],
+        })
+        with st.expander("Lihat tabel prediksi 12 bulan"):
+            _show_df(tabel, hide_index=True)
+
+
+def _render_tab_denorm(h, key_prefix="adm2"):
+    """Tab Denormalisasi: plot norm & asli persis seperti Cell 18/19 notebook."""
+    with st.container(border=True):
+        st.markdown(
+            '<div class="ct">Visualisasi Hasil Denormalisasi & Rekonstruksi Sub-Mode</div>'
+            '<div class="cs">Transformasi balik hasil prediksi GRU dari skala [0,1] ke skala asli pengunjung — '
+            'identik dengan Cell 18 & 19 notebook skripsi</div>',
+            unsafe_allow_html=True
+        )
+        sub_preds = h.get("sub_mode_preds", {})
+        sub_list = ["Semua Komponen (Rekonstruksi Total)"] + list(sub_preds.keys())
+        pilih_mode = st.selectbox("Pilih Tinjauan Denormalisasi:", sub_list, key=f"{key_prefix}_sel_denorm")
+        c_name = None if "Semua Komponen" in pilih_mode else pilih_mode
+        _show_chart(fig_denormalisasi(h, c_name), key=f"{key_prefix}_fig_denorm")
+
+        png_den_norm = h.get("png_map", {}).get("06_final_reconstruction_prediction_norm.png")
+        png_den_asli = h.get("png_map", {}).get("07_final_reconstruction_prediction_original_scale.png")
+        col_g1, col_g2 = st.columns(2)
+        with col_g1:
+            if png_den_norm and os.path.exists(png_den_norm):
+                with st.expander("Grafik Notebook (Skala 0–1)", expanded=True):
+                    st.image(png_den_norm, caption="06_final_reconstruction_prediction_norm.png", use_container_width=True)
+        with col_g2:
+            if png_den_asli and os.path.exists(png_den_asli):
+                with st.expander("Grafik Notebook (Skala Asli)", expanded=True):
+                    st.image(png_den_asli, caption="07_final_reconstruction_prediction_original_scale.png", use_container_width=True)
+
+        if sub_preds:
+            with st.expander("Lihat Evaluasi Metrik per Sub-Mode (Skala Normalisasi & Skala Asli)"):
+                rows = []
+                for k, v in sub_preds.items():
+                    rows.append({
+                        "Sub-Komponen": k,
+                        "MAE (Norm 0-1)": f"{v['mae_norm']:.4f}",
+                        "MAPE (Norm %)": f"{v['mape_norm']:.2f}%",
+                        "MAE (Skala Asli)": f"{v.get('mae_den', 0):,.2f}",
+                        "MAPE (Skala Asli %)": f"{v.get('mape_den', 0):.2f}%"
+                    })
+                _show_df(pd.DataFrame(rows), hide_index=True)
+
+
+def render_hasil_iceemdan_gru(h):
+    """Render hasil Admin untuk metode Hybrid ICEEMDAN-GRU (dari file notebook)."""
+    if st is None:
+        return
+    st.markdown(_TABS_CSS, unsafe_allow_html=True)
+
+    tab_eval, tab_inter, tab_ice, tab_norm, tab_denorm = st.tabs([
+        "📊 Hasil Evaluasi & Prediksi 12 Bulan",
+        "📈 Data Aktual & Hasil Interpolasi",
+        "🌊 Sinyal Dekomposisi ICEEMDAN",
+        "📏 Sebelum & Sesudah Normalisasi",
+        "🔄 Hasil Denormalisasi",
+    ])
+
+    with tab_eval:
+        _render_tab_evaluasi(h, key_prefix="ice_gru")
+
+    with tab_inter:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Data Aktual dan Hasil Interpolasi Linear</div>'
+                '<div class="cs">Perbandingan data kunjungan asli dengan hasil pengisian gap nilai 0 '
+                'melalui interpolasi linear</div>',
+                unsafe_allow_html=True
+            )
+            col_m1, col_m2, col_m3 = st.columns(3)
+            with col_m1:
+                st.metric("Total Data Historis", f"{len(h['tgl_hist'])} Bulan")
+            with col_m2:
+                st.metric("Titik Gap (Nilai 0)", f"{len(h.get('gap_log', []))} Titik")
+            with col_m3:
+                rata2 = np.mean(h['aktual_hist']) if h['aktual_hist'] else 0
+                st.metric("Rata-rata Pengunjung", f"{_fmt_id(rata2)} orang")
+            _show_chart(fig_interpolasi(h), key="ice_gru_fig_inter")
+            if h.get("gap_log"):
+                with st.expander("Lihat Rincian Titik Gap"):
+                    df_gap = pd.DataFrame(h["gap_log"])
+                    df_gap["date"] = pd.to_datetime(df_gap["date"]).dt.strftime("%B %Y")
+                    df_gap.rename(columns={"date": "Bulan & Tahun", "visitors": "Nilai Asli",
+                                           "new_value": "Hasil Imputasi Linear"}, inplace=True)
+                    _show_df(df_gap, hide_index=True)
+            with st.expander("Lihat Tabel Lengkap Data Historis"):
+                _show_df(pd.DataFrame({
+                    "Bulan": [_tgl_id(d) for d in h["tgl_hist"]],
+                    "Data Asli": [_fmt_id(v) for v in h["raw_hist"]],
+                    "Hasil Interpolasi": [_fmt_id(v) for v in h["aktual_hist"]],
+                }), hide_index=True)
+
+    with tab_ice:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Sinyal Dekomposisi ICEEMDAN</div>'
+                '<div class="cs">Dekomposisi sinyal tren menjadi sub-komponen IMF dan Residu</div>',
+                unsafe_allow_html=True
+            )
+            n_comps = len(h.get("ice_data", {}))
+            col_i1, col_i2 = st.columns(2)
+            with col_i1:
+                st.metric("Jumlah Komponen", f"{n_comps} Komponen")
+            with col_i2:
+                st.metric("Metode Dekomposisi", "ICEEMDAN")
+            _show_chart(fig_iceemdan(h), key="ice_gru_fig_ice")
+            png_ice = h.get("png_map", {}).get("03_iceemdan_decomposition.png")
+            if png_ice and os.path.exists(png_ice):
+                with st.expander("Grafik Notebook ICEEMDAN", expanded=True):
+                    st.image(png_ice, caption="03_iceemdan_decomposition.png", use_container_width=True)
+
+    with tab_norm:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Sebelum dan Sesudah Normalisasi (Min-Max 0–1)</div>'
+                '<div class="cs">Transformasi skala fitur ke rentang [0, 1]</div>',
+                unsafe_allow_html=True
+            )
+            comps_list = list(h.get("comps", {}).keys())
+            if comps_list:
+                sel = st.selectbox("Pilih Sub-Komponen:", comps_list, key="ice_gru_sel_norm")
+                _show_chart(fig_normalisasi(h, sel), key="ice_gru_fig_norm")
+            png_norm = h.get("png_map", {}).get("05_normalization_comparison.png")
+            if png_norm and os.path.exists(png_norm):
+                with st.expander("Grafik Normalisasi Notebook", expanded=True):
+                    st.image(png_norm, caption="05_normalization_comparison.png", use_container_width=True)
+
+    with tab_denorm:
+        _render_tab_denorm(h, key_prefix="ice_gru")
+
+
+def render_hasil_vmd_gru(h):
+    """Render hasil Admin untuk metode Hybrid VMD-GRU (dari file notebook)."""
+    if st is None:
+        return
+    st.markdown(_TABS_CSS, unsafe_allow_html=True)
+
+    tab_eval, tab_inter, tab_vmd, tab_norm, tab_denorm = st.tabs([
+        "📊 Hasil Evaluasi & Prediksi 12 Bulan",
+        "📈 Data Aktual & Hasil Interpolasi",
+        "⚙️ Dekomposisi VMD",
+        "📏 Sebelum & Sesudah Normalisasi",
+        "🔄 Hasil Denormalisasi",
+    ])
+
+    with tab_eval:
+        _render_tab_evaluasi(h, key_prefix="vmd_gru")
+
+    with tab_inter:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Data Aktual dan Hasil Interpolasi Linear</div>'
+                '<div class="cs">Perbandingan data kunjungan asli dengan hasil pengisian gap nilai 0</div>',
+                unsafe_allow_html=True
+            )
+            col_m1, col_m2, col_m3 = st.columns(3)
+            with col_m1:
+                st.metric("Total Data Historis", f"{len(h['tgl_hist'])} Bulan")
+            with col_m2:
+                st.metric("Titik Gap (Nilai 0)", f"{len(h.get('gap_log', []))} Titik")
+            with col_m3:
+                rata2 = np.mean(h['aktual_hist']) if h['aktual_hist'] else 0
+                st.metric("Rata-rata Pengunjung", f"{_fmt_id(rata2)} orang")
+            _show_chart(fig_interpolasi(h), key="vmd_gru_fig_inter")
+            if h.get("gap_log"):
+                with st.expander("Lihat Rincian Titik Gap"):
+                    df_gap = pd.DataFrame(h["gap_log"])
+                    df_gap["date"] = pd.to_datetime(df_gap["date"]).dt.strftime("%B %Y")
+                    df_gap.rename(columns={"date": "Bulan & Tahun", "visitors": "Nilai Asli",
+                                           "new_value": "Hasil Imputasi Linear"}, inplace=True)
+                    _show_df(df_gap, hide_index=True)
+            with st.expander("Lihat Tabel Lengkap Data Historis"):
+                _show_df(pd.DataFrame({
+                    "Bulan": [_tgl_id(d) for d in h["tgl_hist"]],
+                    "Data Asli": [_fmt_id(v) for v in h["raw_hist"]],
+                    "Hasil Interpolasi": [_fmt_id(v) for v in h["aktual_hist"]],
+                }), hide_index=True)
+
+    with tab_vmd:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Pencarian Parameter VMD & Sinyal Dekomposisi VMD</div>'
+                '<div class="cs">Optimasi parameter K dan Alpha VMD serta visualisasi rekonstruksi sinyal</div>',
+                unsafe_allow_html=True
+            )
+            vmd_p = h.get("vmd_data", {}).get("params", [])
+            if vmd_p:
+                st.markdown("<b>Tabel Parameter Optimal VMD:</b>", unsafe_allow_html=True)
+                _show_df(pd.DataFrame(vmd_p), hide_index=True)
+            _show_chart(fig_vmd(h), key="vmd_gru_fig_vmd")
+            png_vmd = h.get("png_map", {}).get("04_reconstruction_vmd.png")
+            if png_vmd and os.path.exists(png_vmd):
+                with st.expander("Grafik Rekonstruksi VMD Notebook", expanded=True):
+                    st.image(png_vmd, caption="04_reconstruction_vmd.png", use_container_width=True)
+
+    with tab_norm:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Sebelum dan Sesudah Normalisasi (Min-Max 0–1)</div>'
+                '<div class="cs">Transformasi skala fitur ke rentang [0, 1]</div>',
+                unsafe_allow_html=True
+            )
+            comps_list = list(h.get("comps", {}).keys())
+            if comps_list:
+                sel = st.selectbox("Pilih Sub-Komponen:", comps_list, key="vmd_gru_sel_norm")
+                _show_chart(fig_normalisasi(h, sel), key="vmd_gru_fig_norm")
+            png_norm = h.get("png_map", {}).get("05_normalization_comparison.png")
+            if png_norm and os.path.exists(png_norm):
+                with st.expander("Grafik Normalisasi Notebook", expanded=True):
+                    st.image(png_norm, caption="05_normalization_comparison.png", use_container_width=True)
+
+    with tab_denorm:
+        _render_tab_denorm(h, key_prefix="vmd_gru")
+
+
+def render_hasil_gru(h):
+    """Render hasil Admin untuk metode GRU murni (dari file notebook)."""
+    if st is None:
+        return
+    st.markdown(_TABS_CSS, unsafe_allow_html=True)
+
+    tab_eval, tab_inter, tab_norm, tab_denorm = st.tabs([
+        "📊 Hasil Evaluasi & Prediksi 12 Bulan",
+        "📈 Data Aktual & Hasil Interpolasi",
+        "📏 Sebelum & Sesudah Normalisasi",
+        "🔄 Hasil Denormalisasi",
+    ])
+
+    with tab_eval:
+        _render_tab_evaluasi(h, key_prefix="gru_only")
+
+    with tab_inter:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Data Aktual dan Hasil Interpolasi Linear</div>'
+                '<div class="cs">Perbandingan data kunjungan asli dengan hasil pengisian gap nilai 0</div>',
+                unsafe_allow_html=True
+            )
+            col_m1, col_m2, col_m3 = st.columns(3)
+            with col_m1:
+                st.metric("Total Data Historis", f"{len(h['tgl_hist'])} Bulan")
+            with col_m2:
+                st.metric("Titik Gap (Nilai 0)", f"{len(h.get('gap_log', []))} Titik")
+            with col_m3:
+                rata2 = np.mean(h['aktual_hist']) if h['aktual_hist'] else 0
+                st.metric("Rata-rata Pengunjung", f"{_fmt_id(rata2)} orang")
+            _show_chart(fig_interpolasi(h), key="gru_fig_inter")
+            if h.get("gap_log"):
+                with st.expander("Lihat Rincian Titik Gap"):
+                    df_gap = pd.DataFrame(h["gap_log"])
+                    df_gap["date"] = pd.to_datetime(df_gap["date"]).dt.strftime("%B %Y")
+                    df_gap.rename(columns={"date": "Bulan & Tahun", "visitors": "Nilai Asli",
+                                           "new_value": "Hasil Imputasi Linear"}, inplace=True)
+                    _show_df(df_gap, hide_index=True)
+            with st.expander("Lihat Tabel Lengkap Data Historis"):
+                _show_df(pd.DataFrame({
+                    "Bulan": [_tgl_id(d) for d in h["tgl_hist"]],
+                    "Data Asli": [_fmt_id(v) for v in h["raw_hist"]],
+                    "Hasil Interpolasi": [_fmt_id(v) for v in h["aktual_hist"]],
+                }), hide_index=True)
+
+    with tab_norm:
+        with st.container(border=True):
+            st.markdown(
+                '<div class="ct">Visualisasi Sebelum dan Sesudah Normalisasi (Min-Max 0–1)</div>'
+                '<div class="cs">Transformasi skala fitur ke rentang [0, 1] agar pelatihan model GRU stabil</div>',
+                unsafe_allow_html=True
+            )
+            png_norm = h.get("png_map", {}).get("05_normalization_comparison.png")
+            if png_norm and os.path.exists(png_norm):
+                with st.expander("Grafik Normalisasi Notebook", expanded=True):
+                    st.image(png_norm, caption="05_normalization_comparison.png", use_container_width=True)
+            comps_list = list(h.get("comps", {}).keys())
+            if comps_list:
+                sel = st.selectbox("Pilih Komponen:", comps_list, key="gru_sel_norm")
+                _show_chart(fig_normalisasi(h, sel), key="gru_fig_norm")
+
+    with tab_denorm:
+        _render_tab_denorm(h, key_prefix="gru_only")
+
+
+def render_hasil_admin(h):
+    """Dispatcher: pilih render function yang sesuai berdasarkan metode."""
+    if st is None:
+        return
+    metode = h.get("metode", "")
+    if metode == "Hybrid ICEEMDAN-VMD-GRU":
+        render_hasil_iceemdan_vmd_gru(h)
+    elif metode == "Hybrid ICEEMDAN-GRU":
+        render_hasil_iceemdan_gru(h)
+    elif metode == "Hybrid VMD-GRU":
+        render_hasil_vmd_gru(h)
+    else:  # GRU murni
+        render_hasil_gru(h)

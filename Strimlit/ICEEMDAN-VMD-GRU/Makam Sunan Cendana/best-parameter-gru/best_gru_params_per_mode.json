@@ -1,0 +1,254 @@
+{
+    "IMF_1_VMD_1": {
+        "units": 64,
+        "dropout": 0.012866924225442453,
+        "batch_size": 4,
+        "learning_rate": 0.001,
+        "best_val_mae": 0.0025774148356287143
+    },
+    "IMF_1_VMD_2": {
+        "units": 24,
+        "dropout": 0.024560735377807903,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.005598717295869863
+    },
+    "IMF_1_VMD_3": {
+        "units": 8,
+        "dropout": 0.23761041783920717,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.008947293501501963
+    },
+    "IMF_1_VMD_4": {
+        "units": 64,
+        "dropout": 0.004079478518878512,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.006564369708844909
+    },
+    "IMF_1_VMD_5": {
+        "units": 16,
+        "dropout": 0.2111115572120128,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.010470125463440609
+    },
+    "IMF_1_VMD_6": {
+        "units": 16,
+        "dropout": 0.19605620088642542,
+        "batch_size": 20,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.01146325621870995
+    },
+    "IMF_1_VMD_7": {
+        "units": 64,
+        "dropout": 0.11053515836933002,
+        "batch_size": 8,
+        "learning_rate": 0.001,
+        "best_val_mae": 0.011184202554887017
+    },
+    "IMF_1_VMD_8": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.014630662878066643
+    },
+    "IMF_1_VMD_9": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.01291293066097852
+    },
+    "IMF_2_VMD_1": {
+        "units": 24,
+        "dropout": 0.014495075247958872,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.01841751684600357
+    },
+    "IMF_2_VMD_2": {
+        "units": 64,
+        "dropout": 0.29441357665311246,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.006874614024902263
+    },
+    "IMF_2_VMD_3": {
+        "units": 64,
+        "dropout": 0.11053515836933002,
+        "batch_size": 8,
+        "learning_rate": 0.001,
+        "best_val_mae": 0.0034564427264000388
+    },
+    "IMF_2_VMD_4": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0045928635268555175
+    },
+    "IMF_2_VMD_5": {
+        "units": 64,
+        "dropout": 0.2155042233063904,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.006706979971784829
+    },
+    "IMF_2_VMD_6": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.020908595068643752
+    },
+    "IMF_2_VMD_7": {
+        "units": 8,
+        "dropout": 0.09931609405349155,
+        "batch_size": 16,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.014905274103526793
+    },
+    "IMF_2_VMD_8": {
+        "units": 16,
+        "dropout": 0.21285633277894156,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.009502024899620395
+    },
+    "IMF_2_VMD_9": {
+        "units": 64,
+        "dropout": 0.0864463632044442,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.007601345172425167
+    },
+    "IMF_2_VMD_10": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.010181679471406972
+    },
+    "IMF_2_VMD_11": {
+        "units": 64,
+        "dropout": 0.22363444058778228,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.026983379219552028
+    },
+    "IMF_3_VMD_1": {
+        "units": 16,
+        "dropout": 0.23953044094945627,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0021936229348533008
+    },
+    "IMF_3_VMD_2": {
+        "units": 16,
+        "dropout": 0.16696440125951162,
+        "batch_size": 20,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0018720257046629719
+    },
+    "IMF_3_VMD_3": {
+        "units": 64,
+        "dropout": 0.12574239243053068,
+        "batch_size": 8,
+        "learning_rate": 0.001,
+        "best_val_mae": 0.0032026374482127086
+    },
+    "IMF_3_VMD_4": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.002339855918458198
+    },
+    "IMF_3_VMD_5": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.00509500848521026
+    },
+    "IMF_3_VMD_6": {
+        "units": 64,
+        "dropout": 0.08126997121128743,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0007742461804707353
+    },
+    "IMF_3_VMD_7": {
+        "units": 64,
+        "dropout": 0.013434353973788837,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.003062414642842695
+    },
+    "IMF_3_VMD_8": {
+        "units": 64,
+        "dropout": 0.0029245164185302958,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0017290755224818872
+    },
+    "IMF_3_VMD_9": {
+        "units": 8,
+        "dropout": 0.23761041783920717,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.003238855983745829
+    },
+    "IMF_3_VMD_10": {
+        "units": 8,
+        "dropout": 0.214249705614196,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.004999601957624147
+    },
+    "IMF_3_VMD_11": {
+        "units": 64,
+        "dropout": 0.0043441117483263205,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0025216032559096063
+    },
+    "IMF_3_VMD_12": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.008614252460782323
+    },
+    "IMF_4_VMD_1": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0009713650339307693
+    },
+    "IMF_4_VMD_2": {
+        "units": 64,
+        "dropout": 0.15547091587579281,
+        "batch_size": 8,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0021868248957504313
+    },
+    "IMF_4_VMD_3": {
+        "units": 64,
+        "dropout": 0.18971307306621638,
+        "batch_size": 4,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.0008196801502899105
+    },
+    "ICEEMDAN_Residue": {
+        "units": 16,
+        "dropout": 0.1200334860452263,
+        "batch_size": 24,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.029955816175895086
+    }
+}

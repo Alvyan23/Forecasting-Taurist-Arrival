@@ -1,0 +1,2 @@
+Component,Best_Val_MAE,units,dropout,batch_size,learning_rate
+visitors,0.2555294514948333,16,0.12468443043576438,20,0.0001

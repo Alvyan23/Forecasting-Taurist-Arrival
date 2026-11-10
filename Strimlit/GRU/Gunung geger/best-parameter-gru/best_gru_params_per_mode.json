@@ -1,0 +1,9 @@
+{
+    "visitors": {
+        "units": 64,
+        "dropout": 0.0732016122780792,
+        "batch_size": 16,
+        "learning_rate": 0.003,
+        "best_val_mae": 0.021362544727198386
+    }
+}
